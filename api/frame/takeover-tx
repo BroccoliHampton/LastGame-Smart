@@ -1,0 +1,112 @@
+import { getAddressForFid } from "../../lib/frame-helpers.js"
+import { ethers } from "ethers"
+
+const CONTRACT_ADDRESS = "0x9C751E6825EDAa55007160b99933846f6ECeEc9B"
+const CHAIN_ID = "eip155:8453" // Base
+const RPC_URL = "https://mainnet.base.org"
+
+const CONTRACT_ABI = [
+  {
+    inputs: [
+      { name: "uri", type: "string" },
+      { name: "channelOwner", type: "address" },
+      { name: "epochId", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+      { name: "maxPaymentAmount", type: "uint256" },
+    ],
+    name: "takeover",
+    outputs: [{ name: "paymentAmount", type: "uint256" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [],
+    name: "getPrice",
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [],
+    name: "getSlot0",
+    outputs: [
+      {
+        components: [
+          { name: "locked", type: "uint8" },
+          { name: "epochId", type: "uint16" },
+          { name: "initPrice", type: "uint192" },
+          { name: "startTime", type: "uint40" },
+          { name: "owner", type: "address" },
+          { name: "uri", type: "string" },
+        ],
+        name: "",
+        type: "tuple",
+      },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+]
+
+export async function POST(req) {
+  try {
+    const body = await req.json()
+
+    // Get user's address from their FID
+    const address = await getAddressForFid(body.untrustedData.fid)
+
+    if (!address) {
+      return new Response(JSON.stringify({ error: "Could not get user address" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      })
+    }
+
+    // Read current price and epochId from contract
+    const provider = new ethers.JsonRpcProvider(RPC_URL)
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider)
+
+    const [currentPrice, slot0] = await Promise.all([contract.getPrice(), contract.getSlot0()])
+
+    const epochId = slot0.epochId
+
+    // Add 10% buffer to max payment amount to account for price changes
+    const maxPaymentAmount = (currentPrice * 110n) / 100n
+
+    // Set deadline to 5 minutes from now
+    const deadline = Math.floor(Date.now() / 1000) + 300
+
+    // Encode the takeover function call
+    const iface = new ethers.Interface(CONTRACT_ABI)
+    const takeoverCalldata = iface.encodeFunctionData("takeover", [
+      "", // uri - empty string
+      address, // channelOwner - user's address
+      epochId, // current epochId
+      deadline, // deadline timestamp
+      maxPaymentAmount.toString(), // max payment amount with buffer
+    ])
+
+    return new Response(
+      JSON.stringify({
+        chainId: CHAIN_ID,
+        method: "eth_sendTransaction",
+        params: {
+          abi: CONTRACT_ABI,
+          to: CONTRACT_ADDRESS,
+          data: takeoverCalldata,
+          value: "0",
+        },
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      },
+    )
+  } catch (error) {
+    console.error("[v0] Error in takeover-tx:", error)
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    })
+  }
+}
